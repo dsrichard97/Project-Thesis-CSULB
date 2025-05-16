@@ -1,0 +1,1538 @@
+---
+title: "Enhancing Call Center Efficiency Through Predictive Analytics and Staffing Optimization"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(showtext)
+library(marquee)
+library(ggtext)
+library(ggridges)
+library(viridis)
+library(tidymodels)
+library(modeltime)
+library(Metrics)
+library(gt)
+library(gtExtras)
+library(tsfgrnn)
+```
+
+```{r}
+font_add_google("Oswald", regular.wt = 400, family = "title")         
+font_add_google("Roboto Condensed", family = "text")
+showtext_auto()
+showtext_opts(dpi = 300)
+```
+
+```{r}
+# Read Data
+df <- read_csv("phidata 2.csv")
+
+# Data Overview
+glimpse(df)
+```
+
+## Prelimanary EDA
+
+```{r}
+cleaned_df <- df %>%
+  select(RSN_CALL_MSKD, `CALL_IN_TIME MASKED`, `CALL_OUT_TIME MASKED`, ORDER_TURNOVER_MINUTES) %>%
+  rename(
+    CALL_IN_TIME_MASKED = `CALL_IN_TIME MASKED`,
+    CALL_OUT_TIME_MASKED = `CALL_OUT_TIME MASKED`,
+    TURNOVER_MINUTES = ORDER_TURNOVER_MINUTES
+  ) %>%
+  mutate(
+    CALL_IN_TIME_MASKED = parse_date_time(str_c("2024 ", CALL_IN_TIME_MASKED), '%Y %m/%d %I:%M %p', tz = "UTC"),
+    CALL_OUT_TIME_MASKED = parse_date_time(str_c("2024 ", CALL_OUT_TIME_MASKED), '%Y %m/%d %I:%M %p', tz = "UTC")
+  )
+
+glimpse(cleaned_df)
+```
+
+```{r}
+# Information about the provide type
+unique(cleaned_df$RSN_CALL_MSKD)
+```
+
+```{r}
+cleaned_df %>%
+  group_by(RSN_CALL_MSKD) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+```
+
+```{r}
+min(hour(cleaned_df$CALL_IN_TIME_MASKED))
+max(hour(cleaned_df$CALL_IN_TIME_MASKED))
+
+time_intervals <- cleaned_df %>%
+  mutate(time_intervals = case_when(
+    hour(CALL_IN_TIME_MASKED) >= 0 & hour(CALL_IN_TIME_MASKED) < 8 ~ "[12am, 8am)",
+    hour(CALL_IN_TIME_MASKED) >= 8 & hour(CALL_IN_TIME_MASKED) < 16 ~ "[8am, 4pm)",
+    hour(CALL_IN_TIME_MASKED) >= 16 & hour(CALL_IN_TIME_MASKED) < 24 ~ "[4pm, 12am)"),
+    month = month(CALL_IN_TIME_MASKED, label = TRUE),
+    day_week = wday(CALL_IN_TIME_MASKED, label = TRUE)
+  ) %>%
+  filter(TURNOVER_MINUTES >= 0)
+
+head(time_intervals)
+```
+
+```{r}
+# text
+title_text   <- str_glue("Call in Time by Day of the Week") 
+
+subtitle_text <- "Focusing on the {#007FFF _**Patient**_} Call Only"
+
+# colors
+title_col    <- "#3d3d3d"           
+subtitle_col <- "#3d3d3d"     
+caption_col  <- "gray30"   
+text_col     <- colorspace::darken("#8e8a7b" , 0.2)    
+
+#plot theme
+theme_set(theme_minimal(base_size = 14, base_family = "text"))                
+
+theme_update(
+  plot.title.position   = "plot",
+  plot.caption.position = "plot",
+  
+  legend.position       = "top",
+  legend.title          = element_text(size = rel(.85), hjust = 0.5),
+  legend.text           = element_text(size = rel(0.5)),
+  
+  plot.margin           = margin(t = 10, r = 15, b = 0, l = 15),       
+  plot.background       = element_rect(fill = "white", color = "white"),
+  panel.background      = element_rect(fill = "white", color = "white"),
+  
+  axis.title.x          = element_text(margin = margin(10, 0, 0, 0), size = rel(1), color = text_col, family = 'text', face = 'bold'),
+  axis.title.y          = element_text(margin = margin(0, 10, 0, 0), size = rel(1), color = text_col, family = 'text', face = 'bold'),
+  axis.text             = element_text(size = rel(0.75), color = text_col, family = 'text'),
+  axis.line.x           = element_line(color = "#7F7F7F", linewidth = 0.2),
+  
+  panel.grid.minor.y    = element_blank(),
+  panel.grid.major.y    = element_blank(),
+  
+  panel.grid.minor.x    = element_blank(),
+  panel.grid.major.x    = element_line(linetype = "dotted", linewidth = 0.1, color = 'gray75'),
+  
+)
+```
+
+
+```{r}
+time_intervals %>%
+  group_by(RSN_CALL_MSKD) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+p <- time_intervals %>%
+  filter(RSN_CALL_MSKD %in% "Patient") %>%
+  group_by(day_week) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x = day_week, y = count, label = count, fill = ifelse(count == max(count), "Highlighted", "Normal"))) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(y = count + 500), hjust = 0.5, size = 3.5, family = "title") +
+  scale_x_discrete() +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 24000)) +
+  scale_fill_manual(values = c("Highlighted" = "#ff8000", "Normal" = "#007FFF")) +
+  labs(
+    x = "Days of the Week",
+    y = NULL,
+    title = title_text,
+    subtitle = subtitle_text
+  ) +
+  theme(
+    plot.title    = element_text(
+      size        = rel(1.8),
+      family      = "title",
+      face        = "bold",
+      color       = title_col,
+      margin      = margin(t = 5, b = 5)
+    ),        
+    plot.subtitle = element_marquee(
+      size        = rel(1.1),
+      family      = 'subtitle',
+      color       = subtitle_col,
+      margin      = margin(t = 5, b = 1)
+    ),
+    plot.caption  = element_markdown(
+      size        = rel(.55), 
+      family      = 'caption',
+      color       = caption_col,
+      hjust       = 0,
+      halign      = 0,
+      margin      = margin(t = 10, b = 10)
+    ),
+    legend.position = "none"
+  )
+
+p +
+  geom_curve(aes(x= 6.5, xend = 3.3, y= 20000, yend= 22300), curvature= 0.3, size = 0.4, arrow=arrow(length = unit(0.1, "inch"))) +
+  annotate("text", x = 6.5, 19500, label = "Highest Count of Calls In's", size = 3.7, family = "title")
+  
+
+ggsave("Call in Time by Day of the Week.png", width = 7, height = 7)
+```
+
+```{r}
+time_intervals %>%
+  group_by(RSN_CALL_MSKD, time_intervals) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+```
+
+```{r}
+theme_set(theme_minimal(base_size = 14, base_family = "text"))    
+
+patient <- time_intervals %>%
+  filter(RSN_CALL_MSKD %in% "Patient") %>%
+  group_by(day_week, time_intervals) %>%
+  summarise(count = n()) %>%
+  ungroup() 
+
+head(patient) 
+
+p2 <- patient %>%
+  ggplot(aes(x = day_week, y = time_intervals, fill = count)) + 
+  geom_tile(color = "white", linewidth = 0.15) +
+  scale_y_discrete(expand = c(0,0)) +
+  coord_cartesian(clip = "off") +
+  scale_fill_stepsn(
+    colors = c("#007FFF", "#ff8000"),
+    limits = c(0, 15000),
+    breaks = seq(0, 15000, by = 2500),
+    labels = as.character(seq(0, 15000, by = 2500)),
+    guide = guide_colorsteps(
+      direction = "horizontal",
+      barwidth = unit(10, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  labs(
+    title = "Intensity of Patient Calls Throughout the Week",
+    subtitle = "Each Cell Represents the Total Calls Recorded for a Specific Day",
+    x = "Day of the Week",
+    y = NULL,
+    fill = "Call Count"
+  ) +
+  theme(
+    plot.title = element_markdown(
+      size = rel(1.5),
+      family = "title",
+      face = "bold",
+      margin = margin(t = 5, b = 10)
+    ),
+    plot.subtitle = element_markdown(
+      size = rel(1.1),
+      family = "title",
+      margin = margin(t = 5, b = 10)
+    ),
+    plot.title.position = "plot",
+    legend.position = "top",
+    legend.justification = "right",
+    legend.title.position = "top",
+    legend.title = element_text(
+      hjust = 1,
+      family = "text"),
+    legend.text = element_text(
+      size = rel(0.7),
+      family = "text"
+    ),
+    plot.background = element_rect(fill = "white", color = "white"),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.margin = margin(t = 20, r = 25, b = 20, l = 25),
+    axis.title.x = element_text(margin = margin(10, 0, 0, 0), size = rel(1.2), family = "text", face = "bold", hjust = 0.5, color = "gray25"),
+    axis.title.y = element_text(margin = margin(0, 10, 0, 0), size = rel(1.2), family = "text", face = "bold", hjust = 0.5, color = "gray25"),
+    axis.text = element_text(size = rel(0.8), family = "text", color = "gray25"),
+    axis.line.x = element_line(color = "gray40", linewidth = .15),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linetype = "dotted", linewidth = 0.1, color = 'gray'),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_blank()
+  ) 
+
+text <- str_glue("Highest call volumes on Monday\nand Tuesday, 8am–4pm.")
+
+p2 +
+  geom_text(aes(x = 0.8, y = Inf, label = text),
+            size = 3.5, color = "gray25", vjust = -1.2,
+            lineheight = 0.9, family = "text"
+  )
+
+ggsave("heatmap.png", width = 7, height = 7)
+```
+
+```{r}
+# time wrangling and cleaning
+time_cleaned <- time_intervals %>%
+  select(RSN_CALL_MSKD, month) %>%
+  group_by(RSN_CALL_MSKD, month) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(RSN_CALL_MSKD) %>%
+  mutate(avg_count = mean(count)) %>%
+  ungroup() %>%
+  mutate(rank = dense_rank(desc(avg_count)),
+         group = case_when(rank > 3 ~ "Other Call Reason",
+                           TRUE ~ RSN_CALL_MSKD)) %>%
+  ungroup() %>%
+  group_by(month, group) %>%
+  mutate(total = sum(count)) %>%
+  ungroup() %>%
+  group_by(month) %>%
+  mutate(month_total = sum(count)) %>%
+  ungroup()
+
+head(time_cleaned)
+
+time_total <- time_cleaned %>%
+  group_by(month) %>%
+  summarise(total_num = sum(count))
+
+head(time_total)
+
+labels <- time_cleaned %>%
+  filter(month == "Sep") %>%
+  select(month, group, total) %>% 
+  unique() %>% 
+  mutate(y = cumsum(total) - 0.5 * total)
+
+print(labels)
+```
+
+```{r}
+stack_order <- c("ROUTINE", "REQUEST", "Patient", "Other Call Reason")
+```
+
+```{r}
+time_cleaned %>%
+  mutate(group = factor(group, levels = stack_order)) %>%
+  ggplot(aes(x = month, y = total, fill = group, group = group)) +
+  geom_text(
+    data = labels %>% mutate(group = factor(group, levels = stack_order)),
+    aes(x = 9.1, y = y, label = group, color = group),
+    size = 3,
+    family = "text",
+    fontface = "bold",
+    hjust = 0
+  ) +
+  geom_text(
+    aes(x = month, y = month_total, label = scales::unit_format(unit = "K", scale = 1e-3, accuracy = 0.01)(month_total)),
+    size = 2.5,
+    family = "text",
+    vjust = -2.5,
+    hjust = 0,
+    check_overlap = TRUE
+  ) +
+  geom_area() +
+  geom_point(aes(x = month, y = month_total), color = "black") +
+  geom_segment(aes(x = month, xend = month, y = 0, yend = month_total), linewidth = 0.5, linetype = "dotted", color = "black") +
+  geom_segment(aes(x = 0.75, y = 0, yend = 0, xend = 9.25), linewidth = 0.8, color = "black") +
+  annotate("text", x = 1.6, y = 26000, label = "Total #\nof calls \nby month", hjust = 0, vjust = 0.5, family = "text", size = 2.5, color = "black") +
+  annotate(geom = "curve", x = 2.1, y = 26000, xend = 3.2, yend = 24500, linewidth = 0.3, curvature = -0.6, arrow = arrow(length = unit(1.25, "mm")), color = "black") +
+  scale_fill_manual(values = c("#E17888", "#AE3B8B", "#1C5789", "#341514")) +
+  scale_color_manual(values = c("#E17888", "#AE3B8B", "#1C5789", "#341514")) +
+  scale_y_continuous(expand = c(0,0), limits = c(NA, 30000)) +
+  scale_x_discrete() +
+  coord_cartesian(clip = "off") +
+  theme_void() +
+  theme(
+    plot.title = element_text(family = "title", size = 30, hjust = 0, color = "black", face = "bold"),
+    plot.title.position = "plot",
+    plot.subtitle = element_text(family = "title", size = 8, hjust = 0, color = "black", lineheight = 1.3, margin = margin(t = 10, b = 10)),
+    axis.text.x = element_text(size = 8, family = "text", color = "black", hjust = 0.5, margin = margin(t = 5)),
+    legend.position = "none",
+    plot.margin = unit(c(1, 2, 1, 1), "cm"),
+    panel.background = element_rect(color = NA, fill = "white"),
+    plot.background = element_rect(color = NA, fill = "white")
+  ) +
+  labs(title = "Monthly Trends in Call Types for 2024",
+       subtitle = "This chart illustrates the monthly breakdown of the top 3 call types ranked by average call volume from January through September (with ongoing records\nfor September). Remaining call types are grouped under 'Other Call Reason' for a comprehensive view.")
+
+ggsave("area.png", width = 8, height = 7)
+```
+
+```{r}
+df <- cleaned_df %>%
+  mutate(RSN_CALL_MSKD = str_to_title(RSN_CALL_MSKD),
+         month = month(CALL_IN_TIME_MASKED, label = TRUE),
+         date = date(CALL_IN_TIME_MASKED),
+         diff_day = floor(as.numeric(difftime(CALL_OUT_TIME_MASKED, CALL_IN_TIME_MASKED, units = "days")))) %>%
+  filter(RSN_CALL_MSKD %in% c("Patient", "Routine", "Request"),
+         diff_day == 0) %>%
+  group_by(date) %>%
+  summarise(
+    count = n(),
+    total_min = sum(TURNOVER_MINUTES),
+    total_hrs = total_min / 60
+  ) %>%
+  ungroup() %>%
+  mutate(
+    AHT2 = total_hrs / count,
+    S_t2_RN = 2*ceiling((count * AHT2) / (8 * 5)),
+    S_t2_LVN = 2*ceiling((count * AHT2) / (6 * 5))
+  )
+
+
+df
+```
+
+```{r}
+p <- ggAcf(df$S_t2_LVN) +
+  labs(
+    title = "ACF for Licensed Vocational Nurses")
+
+ggsave(plot = p, "acf LVNs.png", width = 7, height = 7)
+
+p <- ggPacf(df$S_t2_LVN) +
+  labs(
+    title = "PACF for Licensed Vocational Nurses")
+
+ggsave(plot = p, "pacf LVNs.png", width = 7, height = 7)
+```
+
+```{r}
+splits <- initial_time_split(df)
+
+train <- training(splits)
+test <- testing(splits)
+  
+ggplot() +
+  geom_line(data = train, aes(x = date, y = S_t2_RN, color = "Training")) +
+  geom_line(data = test, aes(x = date, y = S_t2_RN, color = "Testing")) +
+  scale_color_manual(name = NULL, values = c("Training" = "#36454f", "Testing" = "#007FFF"), guide = guide_legend(reverse = TRUE)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 800, by = 100)) +
+  labs(
+    x = "Date",
+    y = "Staffing Requirements",
+    title = "Time Series Cross Validation Plan for Registered Nurses in 2024") +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      face = "bold",
+      color = title_col,
+      size = 18
+    )
+  )
+
+ggsave("Cross Validation RNs.png", width = 7, height = 4)
+
+
+ggplot() +
+  geom_line(data = train, aes(x = date, y = S_t2_LVN, color = "Training")) +
+  geom_line(data = test, aes(x = date, y = S_t2_LVN, color = "Testing")) +
+  scale_color_manual(name = NULL, values = c("Training" = "#36454f", "Testing" = "#007FFF"), guide = guide_legend(reverse = TRUE)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 100)) +
+  labs(
+    x = "Month",
+    y = "Staffing Requirements",
+    title = "Time Series Cross Validation Plan for Licensed Vocational Nurses in 2024") +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      face = "bold",
+      color = title_col,
+      size = 16
+    )
+  )
+
+ggsave("Cross Validation LVNs.png", width = 7, height = 4)
+```
+
+```{r}
+########## Registered Nurses
+
+# Auto ARIMA Model
+arima_auto_fit <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(S_t2_RN ~ date, data = train)
+
+# Exponential Smoothing Model 
+ets_fit <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(S_t2_RN ~ date, data = train)
+
+# Prophet Model 
+prophet_fit <- prophet_reg() %>% 
+  set_engine("prophet") %>% 
+  fit(S_t2_RN ~ date, data = train)
+
+############# Licensed Vocational Nurses
+
+arima_auto_fit_LVN <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(S_t2_LVN ~ date, data = train)
+
+# Exponential Smoothing Model 
+ets_fit_LVN <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(S_t2_LVN ~ date, data = train)
+
+# Prophet Model 
+prophet_fit_LVN <- prophet_reg() %>% 
+  set_engine("prophet") %>% 
+  fit(S_t2_LVN ~ date, data = train)
+```
+
+```{r}
+########## Registered Nurses
+
+models_tbl <- modeltime_table(
+  arima_auto_fit,
+  ets_fit,
+  prophet_fit
+)
+
+# Calibrate 
+calibrate_tbl <- models_tbl %>% 
+  modeltime_calibrate(new_data = test, quiet = FALSE)
+
+
+ts <- calibrate_tbl %>% 
+  modeltime_forecast(
+    actual_data = df,
+    new_data = test
+  )
+
+ts <- ts %>%
+  mutate(type = "Registered")
+
+############# Licensed Vocational Nurses
+
+models_tbl_LVN <- modeltime_table(
+  arima_auto_fit_LVN,
+  ets_fit_LVN,
+  prophet_fit_LVN
+)
+
+# Calibrate 
+calibrate_tbl_LVN <- models_tbl_LVN %>% 
+  modeltime_calibrate(new_data = test, quiet = FALSE)
+
+ts_LVN <- calibrate_tbl_LVN %>% 
+  modeltime_forecast(
+    actual_data = df,
+    new_data = test
+  )
+
+ts_LVN <- ts_LVN %>%
+  mutate(type = "Licensed")
+
+ts_full <- rbind(ts, ts_LVN)
+
+ts_full
+```
+
+```{r}
+ts_full %>%
+  filter(!.model_desc %in% c("LM", "ARIMA(2,0,0)(0,1,1)[7] WITH DRIFT")) %>%
+  ggplot(aes(x = .index, y = .value / 10, color = .model_desc)) +
+  geom_line() +
+  scale_color_manual(
+    name = NULL,
+    values = c("ACTUAL" = "#36454f", "ARIMA(1,0,1)(0,1,1)[7] WITH DRIFT" = "#164DB0", "ETS(M,A,M)" = "#832C76", "PROPHET" = "#B13A1A", "LM" = "#287E9E")) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 20)) +
+  facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+  labs(
+    x = "Month",
+    y = "Staffing Requirements",
+    title = "Forecast Models for Daily RN and LVN Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      size = 20,
+      face = "bold",
+      color = title_col
+    )
+  )
+
+ggsave("ts forecast models for RNs.png", width = 8, height = 4)
+```
+
+```{r}
+# ARIMA(1,0,1)(0,1,1)[7] WITH DRIFT
+ts_full %>%
+  filter(.model_desc %in% c("ARIMA(1,0,1)(0,1,1)[7] WITH DRIFT", "ACTUAL")) %>%
+  ggplot(aes(x = .index, y = .value / 10, color = .model_desc)) +
+  geom_line() +
+  scale_color_manual(
+    name = NULL,
+    values = c("ACTUAL" = "#36454f", "ARIMA(1,0,1)(0,1,1)[7] WITH DRIFT" = "#164DB0")) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 20)) +
+  facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+  labs(
+    x = "Month",
+    y = "Staffing Requirements",
+    title = "ARIMA Forecast Model for Daily RN and LVN Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      size = 20,
+      face = "bold",
+      color = title_col
+    )
+  )
+
+ggsave("ts forecast ARIMA model for RNs.png", width = 8, height = 4)
+
+# ETS(M,A,M)
+ts_full %>%
+  filter(.model_desc %in% c("ETS(M,A,M)", "ACTUAL")) %>%
+  ggplot(aes(x = .index, y = .value / 10, color = .model_desc)) +
+  geom_line() +
+  scale_color_manual(
+    name = NULL,
+    values = c("ACTUAL" = "#36454f", "ETS(M,A,M)" = "#832C76")) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 20)) +
+  facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+  labs(
+    x = "Month",
+    y = "Staffing Requirements",
+    title = "ETS Forecast Model for Daily RN and LVN Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      size = 20,
+      face = "bold",
+      color = title_col
+    )
+  )
+
+ggsave("ts forecast ETS model for RNs.png", width = 8, height = 4)
+
+# PROPHET
+ts_full %>%
+  filter(.model_desc %in% c("PROPHET", "ACTUAL")) %>%
+  ggplot(aes(x = .index, y = .value / 10, color = .model_desc)) +
+  geom_line() +
+  scale_color_manual(
+    name = NULL,
+    values = c("ACTUAL" = "#36454f", "PROPHET" = "#B13A1A")) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 20)) +
+  facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+  labs(
+    x = "Month",
+    y = "Staffing Requirements",
+    title = "Prophet Forecast Model for Daily RN and LVN Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      family = "title",
+      size = 20,
+      face = "bold",
+      color = title_col
+    )
+  )
+
+ggsave("ts forecast PROPHET model for RNs.png", width = 8, height = 4)
+```
+
+```{r}
+c1 <- calibrate_tbl %>% 
+  modeltime_accuracy() %>%
+  select(.model_desc, mae:rsq) %>%
+  slice(1, 3, 4) %>%
+  mutate(type = "Registered Nurse")
+
+c2 <- calibrate_tbl_LVN %>% 
+  modeltime_accuracy() %>%
+  select(.model_desc, mae:rsq) %>%
+  slice(1, 3, 4) %>%
+  mutate(type = "Licensed Vocational Nurse")
+
+c_full <- rbind(c1, c2)
+
+p <- c_full %>%
+  gt(rowname_col = ".model_desc", groupname_col = "type") %>%
+  tab_header(
+    title = md("**Model Accuracy**")
+  ) %>%
+  cols_label(
+    mae = "MAE",
+    mape = "MAPE",
+    mase = "MASE",
+    smape = "SMAPE",
+    rmse = "RMSE",
+    rsq = "Rsq"
+  ) %>%
+  fmt_number(
+    columns = mae:rsq,
+    decimals = 2
+  ) %>%
+  gt_highlight_rows(
+    rows = c(1, 4),
+    fill = "#89CFF0"
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = 
+        google_font(name = "Roboto Condensed")
+    ),
+    locations = cells_body(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(font = google_font(name = "Oswald")),
+    locations = cells_title(groups = c("title"))
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Oswald")
+    ),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    heading.title.font.size = 25
+  )
+
+gtsave(p, "Model Accuracy.png")
+
+# PROPHET
+p <- c_full %>%
+  gt(rowname_col = ".model_desc", groupname_col = "type") %>%
+  tab_header(
+    title = md("**Model Accuracy**")
+  ) %>%
+  cols_label(
+    mae = "MAE",
+    mape = "MAPE",
+    mase = "MASE",
+    smape = "SMAPE",
+    rmse = "RMSE",
+    rsq = "Rsq"
+  ) %>%
+  fmt_number(
+    columns = mae:rsq,
+    decimals = 2
+  ) %>%
+  gt_highlight_rows(
+    rows = c(3, 6),
+    fill = "#B13A1A"
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = 
+        google_font(name = "Roboto Condensed")
+    ),
+    locations = cells_body(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(font = google_font(name = "Oswald")),
+    locations = cells_title(groups = c("title"))
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Oswald")
+    ),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    heading.title.font.size = 25
+  )
+
+gtsave(p, "Prophet Model Accuracy.png")
+
+# ETS(M,A,M)
+p <- c_full %>%
+  gt(rowname_col = ".model_desc", groupname_col = "type") %>%
+  tab_header(
+    title = md("**Model Accuracy**")
+  ) %>%
+  cols_label(
+    mae = "MAE",
+    mape = "MAPE",
+    mase = "MASE",
+    smape = "SMAPE",
+    rmse = "RMSE",
+    rsq = "Rsq"
+  ) %>%
+  fmt_number(
+    columns = mae:rsq,
+    decimals = 2
+  ) %>%
+  gt_highlight_rows(
+    rows = c(2, 5),
+    fill = "#832C76"
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = 
+        google_font(name = "Roboto Condensed")
+    ),
+    locations = cells_body(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(font = google_font(name = "Oswald")),
+    locations = cells_title(groups = c("title"))
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Oswald")
+    ),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    heading.title.font.size = 25
+  )
+
+gtsave(p, "ETS Model Accuracy.png")
+```
+
+```{r}
+# df_refit <- calibrate_tbl %>%
+#   modeltime_refit(data = df)
+# 
+# df_refit_LVN <- calibrate_tbl_LVN %>%
+#   modeltime_refit(data = df)
+# 
+# df_refit <- df_refit %>% 
+#   modeltime_forecast(h = "3 months", actual_data = df) %>%
+#   mutate(type = "Registered")
+# 
+# df_refit_LVN <- df_refit_LVN %>% 
+#   modeltime_forecast(h = "3 months", actual_data = df) %>%
+#   mutate(type = "Licensed")
+# 
+# df_refit_full <- rbind(df_refit, df_refit_LVN)
+# 
+# df_refit_full %>%
+#   filter(.model_desc %in% c("ACTUAL", "UPDATE: ARIMA(1,0,1)(0,1,2)[7] WITH DRIFT")) %>%
+#   mutate(.value = .value / 10,
+#          .conf_lo = .conf_lo / 10,
+#          .conf_hi = .conf_hi / 10) %>%
+#   ggplot(aes(x = .index, y = .value, color = .model_desc)) +
+#   geom_ribbon(aes(ymin = .conf_lo, ymax = .conf_hi), fill = "grey75", alpha = 0.7, color = NA, show.legend = FALSE) +
+#   geom_line() +
+#   scale_color_manual(name = NULL, values = c("ACTUAL" = "#36454f", "UPDATE: ARIMA(1,0,1)(0,1,2)[7] WITH DRIFT" = "#164DB0")) +
+#   scale_x_date(breaks = "1 month", date_labels = "%b") +
+#   scale_y_continuous(breaks = seq(-100, 100, by = 10)) +
+#   facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+#   labs(
+#     title = "3-Month Forecast of RN and LVN Staffing Requirements Using\nthe Most Accurate Model",
+#     x = "Month",
+#     y = "Staffing Requirements"
+#   ) +
+#   theme(
+#     plot.title = element_text(
+#       size = 20,
+#       family = "title",
+#       face = "bold",
+#       color = title_col
+#     )
+#   )
+# 
+# ggsave("Forecast RN 3 Months.png", width = 8, height = 4)
+# 
+# df_refit_full %>%
+#   mutate(.value = .value / 10,
+#          .conf_lo = .conf_lo / 10,
+#          .conf_hi = .conf_hi / 10) %>%
+#   filter(.model_desc %in% c("ACTUAL", "ETS(M,A,M)", "UPDATE: ETS(M,AD,M)")) %>%
+#   ggplot(aes(x = .index, y = .value, color = .model_desc)) +
+#   geom_ribbon(aes(ymin = .conf_lo, ymax = .conf_hi), fill = "grey75", alpha = 0.7, color = NA, show.legend = FALSE) +
+#   geom_line() +
+#   scale_color_manual(name = NULL, values = c("ACTUAL" = "#36454f", "ETS(M,A,M)" = "#832C76", "UPDATE: ETS(M,AD,M)" = "#49297e")) +
+#   scale_x_date(breaks = "1 month", date_labels = "%b") +
+#   scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+#   facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+#   labs(
+#     title = "3-Month Forecast of RN and LVN Staffing Requirements Using\nthe ETS Model",
+#     x = "Month",
+#     y = "Staffing Requirements"
+#   ) +
+#   theme(
+#     plot.title = element_text(
+#       size = 20,
+#       family = "title",
+#       face = "bold",
+#       color = title_col
+#     )
+#   )
+# 
+# ggsave("Forecast RN 3 Months ETS.png", width = 8, height = 4)
+# 
+# df_refit_full %>%
+#   mutate(.value = .value / 10,
+#          .conf_lo = .conf_lo / 10,
+#          .conf_hi = .conf_hi / 10) %>%
+#   filter(.model_desc %in% c("ACTUAL", "PROPHET")) %>%
+#   ggplot(aes(x = .index, y = .value, color = .model_desc)) +
+#   geom_ribbon(aes(ymin = .conf_lo, ymax = .conf_hi), fill = "grey75", alpha = 0.7, color = NA, show.legend = FALSE) +
+#   geom_line() +
+#   scale_color_manual(name = NULL, values = c("ACTUAL" = "#36454f", "PROPHET" = "#B13A1A")) +
+#   scale_x_date(breaks = "1 month", date_labels = "%b") +
+#   scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+#   facet_wrap(~factor(type, c("Registered", "Licensed"))) +
+#   labs(
+#     title = "3-Month Forecast of RN and LVN Staffing Requirements Using\nthe Prophet Model",
+#     x = "Month",
+#     y = "Staffing Requirements"
+#   ) +
+#   theme(
+#     plot.title = element_text(
+#       size = 20,
+#       family = "title",
+#       face = "bold",
+#       color = title_col
+#     )
+#   )
+# 
+# ggsave("Forecast RN 3 Months Prophet.png", width = 8, height = 4)
+```
+
+```{r}
+df %>%
+  mutate(month_week = (5 + day(date) + wday(floor_date(date, "month"))) %/% 7,
+         day = wday(date, label = TRUE),
+         month = month(date, label = TRUE, abbr = FALSE)) %>%
+  ggplot(aes(x = day, y = month_week, fill = S_t2_RN)) +
+  geom_tile(color = "#FFFFFF", size = 0.2) +
+  facet_wrap(~ month) +
+  scale_y_continuous(trans = scales::reverse_trans()) +
+  scale_fill_viridis(option = "B", trans = "log", direction = -1, 
+                     breaks = c(min(df$S_t2_RN), max(df$S_t2_RN))) +
+  coord_equal() +
+  theme_void() +
+  theme(plot.title = element_text(family = "title", size = 40, hjust = 0.5, color = "#000000", face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(family = "title", size = 10, hjust = 0.5, color = "#000000", margin = margin(b = 20)),
+        legend.position = "top",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8, family = "text", color = "#000000"),
+        legend.key.height = unit(0.25, 'cm'),
+        legend.key.width = unit(1, 'cm'),
+        legend.margin = margin(t = -0.4, b = 0.5, unit='cm'),
+        strip.text = element_text(family = "text", size = 9, hjust = 0.5, color = "#000000", margin = margin(b = 5)),
+        plot.margin = unit(c(0.75, 0.75, 0.75, 0.75), "cm"),
+        plot.background = element_rect(color = NA, fill = "#FFFFFF")) +
+  guides(color = guide_colourbar(title.position = "top", title.hjust = 0.5)) +
+  labs(title = "REGISTERED NURSES",
+       subtitle = "Daily Staffing Requirements in 2024 for RN'S")
+
+ggsave("Daily Staffing Req for RN.png", width = 7, height = 7)
+
+df %>%
+  mutate(month_week = (5 + day(date) + wday(floor_date(date, "month"))) %/% 7,
+         day = wday(date, label = TRUE),
+         month = month(date, label = TRUE, abbr = FALSE)) %>%
+  ggplot(aes(x = day, y = month_week, fill = S_t2_LVN)) +
+  geom_tile(color = "#FFFFFF", size = 0.2) +
+  facet_wrap(~ month) +
+  scale_y_continuous(trans = scales::reverse_trans()) +
+  scale_fill_viridis(option = "B", trans = "log", direction = -1, 
+                     breaks = c(min(df$S_t2_LVN), max(df$S_t2_LVN))) +
+  coord_equal() +
+  theme_void() +
+  theme(plot.title = element_text(family = "title", size = 32, hjust = 0.5, color = "#000000", face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(family = "title", size = 10, hjust = 0.5, color = "#000000", margin = margin(b = 20)),
+        legend.position = "top",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8, family = "text", color = "#000000"),
+        legend.key.height = unit(0.25, 'cm'),
+        legend.key.width = unit(1, 'cm'),
+        legend.margin = margin(t = -0.4, b = 0.5, unit='cm'),
+        strip.text = element_text(family = "text", size = 9, hjust = 0.5, color = "#000000", margin = margin(b = 5)),
+        plot.margin = unit(c(0.75, 0.75, 0.75, 0.75), "cm"),
+        plot.background = element_rect(color = NA, fill = "#FFFFFF")) +
+  guides(color = guide_colourbar(title.position = "top", title.hjust = 0.5)) +
+  labs(title = "LICENSED VOCATIONAL NURSES",
+       subtitle = "Daily Staffing Requirements in 2024 for LVN'S")
+
+ggsave("Daily Staffing Req for LVN.png", width = 7, height = 7)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m1 <- grnn_forecasting(train$S_t2_RN, h = nrow(test))
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_RN) + nrow(test)),
+  Value = c(train$S_t2_RN, round(m1$prediction)),
+  Type = c(rep("Original", length(train$S_t2_RN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#D91200")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_RN, h = 14)
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_RN) + length(pred$prediction)),
+  Value = c(df$S_t2_RN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_RN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#D91200")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN 14-days.png", width = 7, height = 4)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m2 <- grnn_forecasting(train$S_t2_LVN, h = nrow(test))
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_LVN) + nrow(test)),
+  Value = c(train$S_t2_LVN, round(m2$prediction)),
+  Type = c(rep("Original", length(train$S_t2_LVN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#D91200")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_LVN, h = 14)
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_LVN) + length(pred$prediction)),
+  Value = c(df$S_t2_LVN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_LVN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#D91200")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN 14-days.png", width = 7, height = 4)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m3 <- grnn_forecasting(train$S_t2_RN, h = nrow(test), lags = "BE", transform = "none")
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_RN) + nrow(test)),
+  Value = c(train$S_t2_RN, round(m3$prediction)),
+  Type = c(rep("Original", length(train$S_t2_RN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#7A2048")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN BE.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_RN, h = 14, lags = "BE", transform = "none")
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_RN) + length(pred$prediction)),
+  Value = c(df$S_t2_RN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_RN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#7A2048")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN 14-days BE.png", width = 7, height = 4)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m4 <- grnn_forecasting(train$S_t2_LVN, h = nrow(test), lags = "BE", transform = "none")
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_LVN) + nrow(test)),
+  Value = c(train$S_t2_LVN, round(m4$prediction)),
+  Type = c(rep("Original", length(train$S_t2_LVN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#7A2048")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN BE.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_LVN, h = 14, lags = "BE", transform = "none")
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_LVN) + length(pred$prediction)),
+  Value = c(df$S_t2_LVN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_LVN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#7A2048")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN 14-days BE.png", width = 7, height = 4)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m5 <- grnn_forecasting(train$S_t2_RN, h = nrow(test), lags = "FS", transform = "none")
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_RN) + nrow(test)),
+  Value = c(train$S_t2_RN, round(m5$prediction)),
+  Type = c(rep("Original", length(train$S_t2_RN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#735DA5")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN FS.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_RN, h = 14, lags = "FS", transform = "none")
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_RN) + length(pred$prediction)),
+  Value = c(df$S_t2_RN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_RN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#735DA5")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily RN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast RN Months GRNN 14-days FS.png", width = 7, height = 4)
+```
+
+```{r}
+# GRNN forecasting with train and test data
+m6 <- grnn_forecasting(train$S_t2_LVN, h = nrow(test), lags = "FS", transform = "none")
+
+# Combine train and forecast into a tibble with dates
+forecast_df <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(train$S_t2_LVN) + nrow(test)),
+  Value = c(train$S_t2_LVN, round(m6$prediction)),
+  Type = c(rep("Original", length(train$S_t2_LVN)), rep("Forecast", nrow(test)))
+)
+
+forecast_df %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#735DA5")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN FS.png", width = 7, height = 4)
+
+pred <- grnn_forecasting(df$S_t2_LVN, h = 14, lags = "FS", transform = "none")
+
+forecast_weeks <- tibble(
+  Date = seq(as.Date("2024-01-01"), by = "day", length.out = length(df$S_t2_LVN) + length(pred$prediction)),
+  Value = c(df$S_t2_LVN, round(pred$prediction)),
+  Type = c(rep("Original", length(df$S_t2_LVN)), rep("Forecast", length(pred$prediction)))
+)
+
+forecast_weeks %>%
+  mutate(Value = Value / 10) %>%
+  ggplot(aes(x = Date, y = Value, color = Type)) +
+  geom_line() +
+  scale_color_manual(name = NULL, values = c("Original" = "#36454f", "Forecast" = "#735DA5")) +
+  guides(colour = guide_legend(reverse=T)) +
+  scale_x_date(breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(breaks = seq(-100, 150, by = 20)) +
+  labs(
+    title = "Daily LVN Staffing Forecast: GRNN Model with Original and 14-Day Testing Trends",
+    x = "Month",
+    y = "Staffing Requirements"
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      family = "title",
+      face = "bold",
+      color = title_col
+    )
+  ) 
+
+ggsave("Forecast LVN Months GRNN 14-days FS.png", width = 7, height = 4)
+```
+
+```{r}
+# Prepare data with full configuration details
+grnn_results <- tibble(
+  .model_desc = c("Default GRNN", "Backward Elimination", "Forward Selection"),
+  type = "GRNN Models",
+  Lag_Strategy = c(
+    "Auto (PACF)", 
+    "Backward Elimination (BE)",
+    "Forward Selection (FS)"
+  ),
+  Transformation = c(
+    "Additive",
+    "None",
+    "None"
+  ),
+  mae = c(
+    mae(test$S_t2_RN, round(m1$prediction)),
+    mae(test$S_t2_RN, round(m3$prediction)),
+    mae(test$S_t2_RN, round(m5$prediction))
+  ),
+  rmse = c(
+    rmse(test$S_t2_RN, round(m1$prediction)),
+    rmse(test$S_t2_RN, round(m3$prediction)),
+    rmse(test$S_t2_RN, round(m5$prediction))
+  )
+)
+
+# Create styled table
+p <- grnn_results %>%
+  gt(rowname_col = ".model_desc", groupname_col = "type") %>%
+  tab_header(
+    title = md("**GRNN Model Performance**"),
+    subtitle = "Comparing Lag Selection Strategies and Transformations"
+  ) %>%
+  cols_label(
+    Lag_Strategy = "Lag Selection",
+    Transformation = "Transform",
+    mae = "MAE",
+    rmse = "RMSE"
+  ) %>%
+  fmt_number(
+    columns = mae:rmse,
+    decimals = 2
+  ) %>%
+  gt_highlight_rows(
+    rows = which.min(grnn_results$rmse),  # Highlight best model
+    fill = "#B3C8CF"
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Roboto Condensed")
+    ),
+    locations = cells_body(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(font = google_font(name = "Oswald")),
+    locations = cells_title(groups = c("title"))
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Oswald")
+    ),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    heading.title.font.size = 25,
+    heading.subtitle.font.size = 16,
+    column_labels.padding = px(10)
+  ) %>%
+  tab_source_note(
+    source_note = md("Highlighted model shows lowest RMSE")
+  )
+
+gtsave(p, "GRNN Model Accuracy RN.png")
+```
+
+```{r}
+# Prepare data with full configuration details
+grnn_results <- tibble(
+  .model_desc = c("Default GRNN", "Backward Elimination", "Forward Selection"),
+  type = "GRNN Models",
+  Lag_Strategy = c(
+    "Auto (PACF)", 
+    "Backward Elimination (BE)",
+    "Forward Selection (FS)"
+  ),
+  Transformation = c(
+    "Additive",
+    "None",
+    "None"
+  ),
+  mae = c(
+    mae(test$S_t2_LVN, round(m2$prediction)),
+    mae(test$S_t2_LVN, round(m4$prediction)),
+    mae(test$S_t2_LVN, round(m6$prediction))
+  ),
+  rmse = c(
+    rmse(test$S_t2_LVN, round(m2$prediction)),
+    rmse(test$S_t2_LVN, round(m4$prediction)),
+    rmse(test$S_t2_LVN, round(m6$prediction))
+  )
+)
+
+# Create styled table
+p <- grnn_results %>%
+  gt(rowname_col = ".model_desc", groupname_col = "type") %>%
+  tab_header(
+    title = md("**GRNN Model Performance**"),
+    subtitle = "Comparing Lag Selection Strategies and Transformations"
+  ) %>%
+  cols_label(
+    Lag_Strategy = "Lag Selection",
+    Transformation = "Transform",
+    mae = "MAE",
+    rmse = "RMSE"
+  ) %>%
+  fmt_number(
+    columns = mae:rmse,
+    decimals = 2
+  ) %>%
+  gt_highlight_rows(
+    rows = c(2:3),  # Highlight best model
+    fill = "#89A8B2"
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Roboto Condensed")
+    ),
+    locations = cells_body(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(font = google_font(name = "Oswald")),
+    locations = cells_title(groups = c("title"))
+  ) %>%
+  tab_style(
+    style = cell_text(
+      font = google_font(name = "Oswald")
+    ),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    heading.title.font.size = 25,
+    heading.subtitle.font.size = 16,
+    column_labels.padding = px(10)
+  ) %>%
+  tab_source_note(
+    source_note = md("Highlighted model shows lowest RMSE")
+  )
+
+gtsave(p, "GRNN Model Accuracy LVN.png")
+```
+
+
